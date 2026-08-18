@@ -35,6 +35,16 @@ const stripe = process.env.STRIPE_SECRET_KEY
 if (!stripe) {
   console.warn('[startup] STRIPE_SECRET_KEY não configurada — /crea-pagamento e /genera-premium ficarão indisponíveis até configurar.');
 }
+// DEBUG TEMPORÁRIO: mostra no log se as variáveis chegaram até aqui, sem
+// revelar os valores secretos — remover depois que o problema for resolvido.
+console.log('[DEBUG env check]', {
+  SUPABASE_URL_presente: !!process.env.SUPABASE_URL,
+  SUPABASE_URL_valor_comeca_com: (process.env.SUPABASE_URL || '(vazio)').slice(0, 15),
+  SUPABASE_SERVICE_ROLE_KEY_presente: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+  ANTHROPIC_API_KEY_presente: !!process.env.ANTHROPIC_API_KEY,
+  todas_as_variaveis_disponiveis: Object.keys(process.env).filter(k => !k.startsWith('RAILWAY') && !k.startsWith('npm_')),
+});
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY // service role: só o backend usa isso, nunca o front
