@@ -325,6 +325,81 @@ app.post('/genera-anteprima', async (req, res) => {
 });
 
 // ----------------------------------------------------------------------------
+// FIX GAP 2: POST /rigenera-modulo — reescreve SÓ um módulo já existente,
+// mantendo coerência com o resto do curso (recebe título do curso + títulos
+// dos outros módulos como contexto), sem precisar regenerar tudo de novo.
+// Contrato de resposta é mais enxuto que o do curso completo: só o que
+// aquele módulo precisa pra ser re-renderizado.
+// ----------------------------------------------------------------------------
+function validateModuleJSON(mod) {
+  const errors = [];
+  if (!mod || typeof mod !== 'object' || Array.isArray(mod)) { errors.push('formato inválido'); return errors; }
+  if (!mod.content) errors.push('faltando content');
+  return errors;
+}
+
+async function regenerateModuleWithRetry(prompt) {
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+  try {
+    const parsed = extractCourseJSON(text);
+    const errors = validateModuleJSON(parsed);
+    if (errors.length === 0) return parsed;
+    throw new Error(errors.join('; '));
+  } catch (e) {
+    const correctivePrompt = prompt + `\n\nIMPORTANT: your previous response failed to parse as valid JSON (reason: "${e.message}"). Respond again with ONLY the raw JSON object — no markdown, no commentary.`;
+    const response2 = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: correctivePrompt }],
+    });
+    const text2 = response2.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    const parsed2 = extractCourseJSON(text2);
+    const errors2 = validateModuleJSON(parsed2);
+    if (errors2.length > 0) throw new Error('Resposta incompleta: ' + errors2.join('; '));
+    return parsed2;
+  }
+}
+
+app.post('/rigenera-modulo', async (req, res) => {
+  try {
+    const { courseTitle, moduleTitle, moduleIndex, totalModules, otherModuleTitles, langName } = req.body;
+    if (!courseTitle || !moduleTitle) return res.status(400).json({ error: 'dados insuficientes' });
+
+    const lang = langName || 'Italian';
+    const contextLine = (otherModuleTitles && otherModuleTitles.length)
+      ? `The other modules in this course are titled: ${otherModuleTitles.join('; ')}. Keep this module distinct from those — don't repeat their content.`
+      : '';
+
+    const prompt = `You are an instructional designer rewriting ONE module of an existing micro-course, without touching the rest of the course.
+Course title: ${courseTitle}
+This is module ${(moduleIndex || 0) + 1} of ${totalModules || '?'}, titled: "${moduleTitle}"
+${contextLine}
+
+Rewrite this module's teaching content from scratch — a fresh take, different wording and examples than before, but following this exact 5-part pedagogical structure, in ${lang}: (1) THE HOOK — a real relatable problem this module solves, in the first 2-3 sentences; (2) THE CONCEPT — explain the underlying idea simply; (3) THE STEP-BY-STEP — a practical method to follow; (4) THE EXAMPLE — a concrete case study; (5) THE CHALLENGE — one specific actionable task, plus a one-line bridge to what's next. Length: 700-1000 words max.
+
+Respond ONLY with a valid JSON object, no text before or after, no markdown, with this exact structure:
+{
+  "content": "the full module content, in ${lang}, following the 5-part structure above",
+  "key_points": ["key point 1", "key point 2", "key point 3"] (in ${lang}),
+  "quiz_question": "a relevant check-in question, in ${lang}, tied to THE CHALLENGE or THE CONCEPT",
+  "quiz_answer": "short correct answer, in ${lang}"
+}`;
+
+    const result = await regenerateModuleWithRetry(prompt);
+    trackEvent('module_regenerated', { metadata: { moduleIndex } });
+    return res.json(result);
+  } catch (err) {
+    console.error('[/rigenera-modulo]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
+// ----------------------------------------------------------------------------
 // POST /crea-pagamento — cria a sessão de checkout no Stripe
 // ----------------------------------------------------------------------------
 app.post('/crea-pagamento', async (req, res) => {
