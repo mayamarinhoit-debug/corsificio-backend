@@ -103,7 +103,12 @@ async function getAuthedUser(req) {
 // FIX 1: contador de uso gratuito vive no banco, nunca no cliente.
 // Tabela sugerida (ver schema.sql):
 //   free_usage(id, user_id nullable, device_id nullable, used_count, updated_at)
-async function checkAndIncrementFreeUsage({ userId, deviceId }) {
+// FIX: separado em "verificar" (só leitura, não gasta cota) e "confirmar
+// consumo" (só chamado depois que a geração realmente deu certo). Antes,
+// a cota era debitada ANTES de chamar a IA — se a chamada falhasse por
+// qualquer motivo nosso (chave inválida, erro de rede, etc), a pessoa
+// perdia a tentativa gratuita sem culpa dela.
+async function checkFreeUsage({ userId, deviceId }) {
   const filterCol = userId ? 'user_id' : 'device_id';
   const filterVal = userId || deviceId;
 
@@ -118,24 +123,32 @@ async function checkAndIncrementFreeUsage({ userId, deviceId }) {
   const limit = userId ? FREE_ACCOUNT_LIMIT : FREE_ANON_LIMIT;
   const currentCount = existing?.used_count ?? 0;
 
-  if (currentCount >= limit) {
-    return { allowed: false, remaining: 0 };
-  }
+  return {
+    allowed: currentCount < limit,
+    remaining: Math.max(0, limit - currentCount),
+    _existingId: existing?.id || null,
+    _currentCount: currentCount,
+  };
+}
 
-  if (existing) {
-    const { error: updErr } = await supabase
+async function confirmFreeUsageConsumed({ userId, deviceId }, checkResult) {
+  const filterCol = userId ? 'user_id' : 'device_id';
+  const filterVal = userId || deviceId;
+  const limit = userId ? FREE_ACCOUNT_LIMIT : FREE_ANON_LIMIT;
+
+  if (checkResult._existingId) {
+    const { error } = await supabase
       .from('free_usage')
-      .update({ used_count: currentCount + 1, updated_at: new Date().toISOString() })
-      .eq('id', existing.id);
-    if (updErr) throw updErr;
+      .update({ used_count: checkResult._currentCount + 1, updated_at: new Date().toISOString() })
+      .eq('id', checkResult._existingId);
+    if (error) throw error;
   } else {
-    const { error: insErr } = await supabase
+    const { error } = await supabase
       .from('free_usage')
       .insert({ [filterCol]: filterVal, used_count: 1 });
-    if (insErr) throw insErr;
+    if (error) throw error;
   }
-
-  return { allowed: true, remaining: limit - (currentCount + 1) };
+  return { remaining: limit - (checkResult._currentCount + 1) };
 }
 
 // FIX 2: chamada à IA com um retry automático se o JSON vier malformado —
@@ -225,12 +238,12 @@ app.post('/genera', async (req, res) => {
       return res.status(400).json({ error: 'deviceId obrigatório para uso anônimo' });
     }
 
-    const usage = await checkAndIncrementFreeUsage({
+    const usageCheck = await checkFreeUsage({
       userId: user?.id || null,
       deviceId: user ? null : deviceId,
     });
 
-    if (!usage.allowed) {
+    if (!usageCheck.allowed) {
       trackEvent(user ? 'free_limit_reached' : 'login_gate_shown', {
         userId: user?.id,
         deviceId: user ? null : deviceId,
@@ -243,7 +256,14 @@ app.post('/genera', async (req, res) => {
     const course = await callClaudeWithRetry(prompt, {
       trackContext: { userId: user?.id, deviceId: user ? null : deviceId },
     });
-    return res.json({ text: JSON.stringify(course), remaining: usage.remaining });
+
+    // Só debita a cota gratuita AGORA que a geração deu certo de verdade.
+    const { remaining } = await confirmFreeUsageConsumed(
+      { userId: user?.id || null, deviceId: user ? null : deviceId },
+      usageCheck
+    );
+
+    return res.json({ text: JSON.stringify(course), remaining });
   } catch (err) {
     console.error('[/genera]', err);
     return res.status(500).json({ error: err.message || 'erro interno' });
