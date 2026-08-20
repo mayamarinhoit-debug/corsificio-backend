@@ -464,6 +464,9 @@ app.post('/crea-pagamento', async (req, res) => {
     return res.json({ url: session.url, sessionId: session.id });
   } catch (err) {
     console.error('[/crea-pagamento]', err);
+    console.error('[/crea-pagamento] DEBUG detalhe Stripe:', JSON.stringify({
+      message: err.message, type: err.type, param: err.param, code: err.code,
+    }));
     return res.status(500).json({ error: err.message || 'erro interno' });
   }
 });
