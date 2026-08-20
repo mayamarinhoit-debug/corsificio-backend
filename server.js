@@ -431,6 +431,10 @@ app.post('/crea-pagamento', async (req, res) => {
 
     const user = await getAuthedUser(req);
 
+    // DEBUG TEMPORÁRIO: mostra o valor exato de APP_URL (com aspas, pra
+    // revelar espaço/quebra de linha escondidos) — remover depois.
+    console.log('[DEBUG APP_URL]', JSON.stringify(process.env.APP_URL));
+
     // FIX 3 (parte 1): guardamos o prompt já agora, associado ao
     // session.id que o Stripe vai gerar — não dependemos do sessionStorage
     // do navegador sobreviver até o usuário voltar da tela de pagamento.
