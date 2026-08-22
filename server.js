@@ -377,6 +377,47 @@ app.post('/genera-anteprima', async (req, res) => {
 });
 
 // ----------------------------------------------------------------------------
+// FIX MERCADO: POST /genera-struttura — gera SÓ título + subtítulo + títulos
+// e resumos dos módulos (sem o conteúdo pesado de cada aula). É rápido e
+// barato, então não gasta cota gratuita nem de assinatura — o objetivo é a
+// pessoa aprovar o direcionamento antes de comprometer a geração completa
+// (padrão comum em ferramentas de curso por IA: "veja a estrutura primeiro").
+// Usa streaming de verdade (a Anthropic manda token a token) — o frontend
+// mostra os títulos aparecendo ao vivo, em vez de uma tela de espera.
+app.post('/genera-struttura', async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    if (!prompt) return res.status(400).json({ error: 'prompt ausente' });
+
+    const structurePrompt = prompt +
+      `\n\nIMPORTANT: for this request, respond with ONLY title, subtitle, categoria, and for each module ONLY title + a 1-sentence summary (no "content" field, no key_points, no quiz — just title and summary per module). Keep the same JSON structure otherwise, just omit those heavier fields.`;
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no'); // evita buffering em proxies (Railway/nginx)
+
+    const stream = anthropic.messages.stream({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: structurePrompt }],
+    });
+
+    stream.on('text', (chunk) => { res.write(chunk); });
+    stream.on('error', (err) => {
+      console.error('[/genera-struttura] erro no stream:', err);
+      if (!res.headersSent) res.status(500);
+      res.end();
+    });
+    await stream.finalMessage();
+    res.end();
+  } catch (err) {
+    console.error('[/genera-struttura]', err);
+    if (!res.headersSent) return res.status(500).json({ error: err.message || 'erro interno' });
+    res.end();
+  }
+});
+
+// ----------------------------------------------------------------------------
 // FIX GAP 2: POST /rigenera-modulo — reescreve SÓ um módulo já existente,
 // mantendo coerência com o resto do curso (recebe título do curso + títulos
 // dos outros módulos como contexto), sem precisar regenerar tudo de novo.
