@@ -817,8 +817,8 @@ app.post('/crea-abbonamento', async (req, res) => {
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
       customer_email: user.email || undefined,
-      success_url: `${process.env.APP_URL}?sub=1&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.APP_URL}?sub=0`,
+      success_url: `https://www.google.com/?sub=1&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `https://www.google.com/?sub=0`,
       metadata: { user_id: user.id },
     });
 
