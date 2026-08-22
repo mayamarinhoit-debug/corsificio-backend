@@ -18,6 +18,20 @@
 //         da geração terminar".
 // ============================================================================
 
+// FIX DEFINITIVO: descobrimos que o editor de variáveis do Railway estava
+// salvando uma quebra de linha invisível ("\n") no final de alguns valores
+// colados (ex: "price_xxx\n" em vez de "price_xxx"). Isso quebrava tanto
+// Price IDs da Stripe ("No such price") quanto URLs de retorno ("Not a
+// valid URL") — o valor PARECIA certo ao olhar na tela, mas tinha esse
+// caractere extra escondido no fim. Em vez de depender de colar perfeito
+// no painel do Railway pra sempre, todo valor de variável de ambiente
+// sensível passa por essa função, que remove espaços/quebras de linha nas
+// pontas automaticamente.
+function env(name) {
+  const value = process.env[name];
+  return typeof value === 'string' ? value.trim() : value;
+}
+
 const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
@@ -29,8 +43,8 @@ const app = express();
 // FIX: se STRIPE_SECRET_KEY ainda não estiver configurada (ex: testando só a
 // geração gratuita, antes de configurar pagamento), o servidor não deve
 // travar na inicialização — só os endpoints de pagamento ficarão indisponíveis.
-const stripe = process.env.STRIPE_SECRET_KEY
-  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+const stripe = env('STRIPE_SECRET_KEY')
+  ? new Stripe(env('STRIPE_SECRET_KEY'))
   : null;
 if (!stripe) {
   console.warn('[startup] STRIPE_SECRET_KEY não configurada — /crea-pagamento e /genera-premium ficarão indisponíveis até configurar.');
@@ -38,24 +52,24 @@ if (!stripe) {
 // DEBUG TEMPORÁRIO: mostra no log se as variáveis chegaram até aqui, sem
 // revelar os valores secretos — remover depois que o problema for resolvido.
 console.log('[DEBUG env check]', {
-  SUPABASE_URL_presente: !!process.env.SUPABASE_URL,
-  SUPABASE_URL_valor_comeca_com: (process.env.SUPABASE_URL || '(vazio)').slice(0, 15),
-  SUPABASE_SERVICE_ROLE_KEY_presente: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-  ANTHROPIC_API_KEY_presente: !!process.env.ANTHROPIC_API_KEY,
+  SUPABASE_URL_presente: !!env('SUPABASE_URL'),
+  SUPABASE_URL_valor_comeca_com: (env('SUPABASE_URL') || '(vazio)').slice(0, 15),
+  SUPABASE_SERVICE_ROLE_KEY_presente: !!env('SUPABASE_SERVICE_ROLE_KEY'),
+  ANTHROPIC_API_KEY_presente: !!env('ANTHROPIC_API_KEY'),
   todas_as_variaveis_disponiveis: Object.keys(process.env).filter(k => !k.startsWith('RAILWAY') && !k.startsWith('npm_')),
 });
 
 const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // service role: só o backend usa isso, nunca o front
+  env('SUPABASE_URL'),
+  env('SUPABASE_SERVICE_ROLE_KEY') // service role: só o backend usa isso, nunca o front
 );
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic = new Anthropic({ apiKey: env('ANTHROPIC_API_KEY') });
 
 // Resend é usado só para o e-mail de entrega assíncrona (FIX 4, abaixo).
 // Qualquer provedor de e-mail transacional serve aqui; troquei por Resend
 // por ser a integração mais simples de configurar.
 const { Resend } = require('resend');
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+const resend = env('RESEND_API_KEY') ? new Resend(env('RESEND_API_KEY')) : null;
 
 const FREE_ANON_LIMIT = 1;   // sem login: 1 geração, depois exige conta
 const FREE_ACCOUNT_LIMIT = 3; // com conta: total de 3 gerações gratuitas
@@ -464,8 +478,8 @@ app.post('/crea-pagamento', async (req, res) => {
       // parâmetro ANTES dele na mesma URL ("paid=1&session_id=...") quebra
       // a validação do Stripe ("Not a valid URL") — mesmo sendo sintaxe
       // documentada oficialmente. Sozinho (ou por último), funciona.
-      success_url: `${process.env.APP_URL}?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.APP_URL}?paid=0`,
+      success_url: `${env('APP_URL')}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${env('APP_URL')}?paid=0`,
       metadata: { user_id: user?.id || '' },
     });
 
@@ -526,7 +540,7 @@ async function generateAndDeliverCourse({ sessionId, prompt, userId, customerEma
 
     if (resend && customerEmail) {
       await resend.emails.send({
-        from: process.env.EMAIL_FROM || 'Corsificio <noreply@corsificio.com>',
+        from: env('EMAIL_FROM') || 'Corsificio <noreply@corsificio.com>',
         to: customerEmail,
         subject: `O seu curso "${course.title || 'Corsificio'}" está pronto`,
         html: buildDeliveryEmailHtml({ course, sessionId, userId }),
@@ -562,7 +576,7 @@ async function generateAndDeliverCourse({ sessionId, prompt, userId, customerEma
 // canal de vocês exigir outro payload). Sem ALERT_WEBHOOK_URL configurada,
 // o alerta vira só um log — não quebra o fluxo principal.
 async function alertTeamOfFailure({ sessionId, userId, customerEmail, reason }) {
-  if (!process.env.ALERT_WEBHOOK_URL) {
+  if (!env('ALERT_WEBHOOK_URL')) {
     console.warn('[alertTeamOfFailure] ALERT_WEBHOOK_URL não configurada — alerta ficou só no log/banco');
     return;
   }
@@ -573,7 +587,7 @@ async function alertTeamOfFailure({ sessionId, userId, customerEmail, reason }) 
     `Motivo: ${reason}\n` +
     `Ação: reprocessar chamando /genera-premium com esse sessionId, ou investigar em pending_generations.`;
   try {
-    await fetch(process.env.ALERT_WEBHOOK_URL, {
+    await fetch(env('ALERT_WEBHOOK_URL'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
@@ -591,8 +605,8 @@ function buildDeliveryEmailHtml({ course, sessionId, userId }) {
     .map((m, i) => `<li><strong>Módulo ${i + 1}:</strong> ${escapeHtml(m.title || '')}</li>`)
     .join('');
   const accessLine = userId
-    ? `Ele já está salvo na sua conta — acesse em ${process.env.APP_URL}?tab=account`
-    : `Guarde este e-mail: seu curso não está vinculado a uma conta. Se quiser criar uma para acessá-lo depois, cadastre-se com este mesmo e-mail em ${process.env.APP_URL}`;
+    ? `Ele já está salvo na sua conta — acesse em ${env('APP_URL')}?tab=account`
+    : `Guarde este e-mail: seu curso não está vinculado a uma conta. Se quiser criar uma para acessá-lo depois, cadastre-se com este mesmo e-mail em ${env('APP_URL')}`;
   return `
     <h2>${escapeHtml(course.title || 'Seu curso')}</h2>
     <p>${escapeHtml(course.subtitle || '')}</p>
@@ -673,7 +687,7 @@ async function stripeWebhookHandler(req, res) {
   const sig = req.headers['stripe-signature'];
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    event = stripe.webhooks.constructEvent(req.body, sig, env('STRIPE_WEBHOOK_SECRET'));
   } catch (err) {
     console.error('[stripe-webhook] assinatura inválida', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -821,8 +835,8 @@ app.post('/crea-abbonamento', async (req, res) => {
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
       customer_email: user.email || undefined,
-      success_url: `https://www.google.com/?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `https://www.google.com/`,
+      success_url: `${env('APP_URL')}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${env('APP_URL')}?sub=0`,
       metadata: { user_id: user.id },
     });
 
@@ -832,7 +846,7 @@ app.post('/crea-abbonamento', async (req, res) => {
     console.error('[/crea-abbonamento] DEBUG detalhe Stripe:', JSON.stringify({
       message: err.message, type: err.type, param: err.param, code: err.code,
     }));
-    console.error('[/crea-abbonamento] DEBUG APP_URL:', JSON.stringify(process.env.APP_URL));
+    console.error('[/crea-abbonamento] DEBUG APP_URL:', JSON.stringify(env('APP_URL')));
     return res.status(500).json({ error: err.message || 'erro interno' });
   }
 });
@@ -855,7 +869,7 @@ app.post('/portale-cliente', async (req, res) => {
 
     const portalSession = await stripe.billingPortal.sessions.create({
       customer: sub.stripe_customer_id,
-      return_url: process.env.APP_URL,
+      return_url: env('APP_URL'),
     });
 
     return res.json({ url: portalSession.url });
@@ -910,7 +924,7 @@ app.post('/certificato/pubblica', async (req, res) => {
     if (error) throw error;
 
     trackEvent('certificate_shared', { userId: user?.id, metadata: { slug } });
-    return res.json({ slug, url: `${process.env.APP_URL}?cert=${slug}` });
+    return res.json({ slug, url: `${env('APP_URL')}?cert=${slug}` });
   } catch (err) {
     console.error('[/certificato/pubblica]', err);
     return res.status(500).json({ error: err.message || 'erro interno' });
@@ -941,19 +955,19 @@ app.get('/certificato/:slug', async (req, res) => {
 // é configurado direto no Stripe — aqui só mapeamos qual Price ID usar.
 const REGION_PRICE_MAP = {
   EUR: {
-    completo: process.env.STRIPE_PRICE_COMPLETO_EUR || process.env.STRIPE_PRICE_COMPLETO,
-    professionale: process.env.STRIPE_PRICE_PROFESSIONALE_EUR || process.env.STRIPE_PRICE_PROFESSIONALE,
-    abbonamento: process.env.STRIPE_PRICE_ABBONAMENTO_EUR,
+    completo: env('STRIPE_PRICE_COMPLETO_EUR') || env('STRIPE_PRICE_COMPLETO'),
+    professionale: env('STRIPE_PRICE_PROFESSIONALE_EUR') || env('STRIPE_PRICE_PROFESSIONALE'),
+    abbonamento: env('STRIPE_PRICE_ABBONAMENTO_EUR'),
   },
   USD: {
-    completo: process.env.STRIPE_PRICE_COMPLETO_USD || process.env.STRIPE_PRICE_COMPLETO,
-    professionale: process.env.STRIPE_PRICE_PROFESSIONALE_USD || process.env.STRIPE_PRICE_PROFESSIONALE,
-    abbonamento: process.env.STRIPE_PRICE_ABBONAMENTO_USD || process.env.STRIPE_PRICE_ABBONAMENTO_EUR,
+    completo: env('STRIPE_PRICE_COMPLETO_USD') || env('STRIPE_PRICE_COMPLETO'),
+    professionale: env('STRIPE_PRICE_PROFESSIONALE_USD') || env('STRIPE_PRICE_PROFESSIONALE'),
+    abbonamento: env('STRIPE_PRICE_ABBONAMENTO_USD') || env('STRIPE_PRICE_ABBONAMENTO_EUR'),
   },
   default: {
-    completo: process.env.STRIPE_PRICE_COMPLETO,
-    professionale: process.env.STRIPE_PRICE_PROFESSIONALE,
-    abbonamento: process.env.STRIPE_PRICE_ABBONAMENTO_EUR,
+    completo: env('STRIPE_PRICE_COMPLETO'),
+    professionale: env('STRIPE_PRICE_PROFESSIONALE'),
+    abbonamento: env('STRIPE_PRICE_ABBONAMENTO_EUR'),
   },
 };
 
@@ -963,8 +977,8 @@ function getRegionPriceId(currency, planKey) {
 }
 
 const PLAN_TO_PRICE_ID = {
-  completo: process.env.STRIPE_PRICE_COMPLETO,
-  professionale: process.env.STRIPE_PRICE_PROFESSIONALE,
+  completo: env('STRIPE_PRICE_COMPLETO'),
+  professionale: env('STRIPE_PRICE_PROFESSIONALE'),
 };
 
 const port = process.env.PORT || 3000;
