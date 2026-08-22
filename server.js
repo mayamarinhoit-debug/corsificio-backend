@@ -460,7 +460,11 @@ app.post('/crea-pagamento', async (req, res) => {
       mode: 'payment',
       line_items: [{ price: priceId, quantity: 1 }],
       customer_email: user?.email || undefined,
-      success_url: `${process.env.APP_URL}?paid=1&session_id={CHECKOUT_SESSION_ID}`,
+      // FIX: descobrimos que combinar {CHECKOUT_SESSION_ID} com outro
+      // parâmetro ANTES dele na mesma URL ("paid=1&session_id=...") quebra
+      // a validação do Stripe ("Not a valid URL") — mesmo sendo sintaxe
+      // documentada oficialmente. Sozinho (ou por último), funciona.
+      success_url: `${process.env.APP_URL}?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.APP_URL}?paid=0`,
       metadata: { user_id: user?.id || '' },
     });
@@ -817,8 +821,8 @@ app.post('/crea-abbonamento', async (req, res) => {
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
       customer_email: user.email || undefined,
-      success_url: `https://www.google.com/?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `https://www.google.com/`,
+      success_url: `${process.env.APP_URL}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.APP_URL}?sub=0`,
       metadata: { user_id: user.id },
     });
 
