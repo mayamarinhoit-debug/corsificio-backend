@@ -238,6 +238,23 @@ app.post('/genera', async (req, res) => {
       return res.status(400).json({ error: 'deviceId obrigatório para uso anônimo' });
     }
 
+    // FIX PRODUTO 1: assinante ativo com cota do mês disponível pula
+    // inteiramente a lógica de free-tier — gera direto, sem gastar a cota
+    // gratuita nem pedir pagamento avulso.
+    const activeSub = user ? await getActiveSubscription(user.id) : null;
+    if (activeSub) {
+      if (activeSub.used_count >= activeSub.monthly_quota) {
+        trackEvent('subscription_quota_esgotada', { userId: user.id });
+        return res.status(403).json({ error: 'quota_mensile_esgotada' });
+      }
+      const course = await callClaudeWithRetry(prompt, { trackContext: { userId: user.id } });
+      await incrementSubscriptionUsage(activeSub.id, activeSub.used_count);
+      return res.json({
+        text: JSON.stringify(course),
+        subscriptionUsage: { used: activeSub.used_count + 1, quota: activeSub.monthly_quota },
+      });
+    }
+
     const usageCheck = await checkFreeUsage({
       userId: user?.id || null,
       deviceId: user ? null : deviceId,
@@ -425,15 +442,13 @@ Respond ONLY with a valid JSON object, no text before or after, no markdown, wit
 app.post('/crea-pagamento', async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'pagamento_nao_configurado' });
   try {
-    const { plan, prompt } = req.body;
-    const priceId = PLAN_TO_PRICE_ID[plan];
+    const { plan, prompt, currency } = req.body;
+    // FIX PRODUTO 3: escolhe o Price ID pelo par moeda+plano, com fallback
+    // pro Price ID antigo (EUR) se a moeda não tiver preço-base configurado.
+    const priceId = getRegionPriceId((currency || 'EUR').toUpperCase(), plan) || PLAN_TO_PRICE_ID[plan];
     if (!priceId) return res.status(400).json({ error: 'plano inválido' });
 
     const user = await getAuthedUser(req);
-
-    // DEBUG TEMPORÁRIO: mostra o valor exato de APP_URL (com aspas, pra
-    // revelar espaço/quebra de linha escondidos) — remover depois.
-    console.log('[DEBUG APP_URL]', JSON.stringify(process.env.APP_URL));
 
     // FIX 3 (parte 1): guardamos o prompt já agora, associado ao
     // session.id que o Stripe vai gerar — não dependemos do sessionStorage
@@ -663,6 +678,36 @@ async function stripeWebhookHandler(req, res) {
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
 
+    // FIX PRODUTO 1: checkout de assinatura é um fluxo separado do de
+    // curso avulso — não tem pending_generations, o que existe é ativar
+    // a linha em `subscriptions` vinculada ao usuário.
+    if (session.mode === 'subscription') {
+      const userId = session.metadata?.user_id || null;
+      if (!userId) {
+        console.error('[stripe-webhook] checkout de assinatura sem user_id no metadata, sessão', session.id);
+      } else {
+        try {
+          const sub = await stripe.subscriptions.retrieve(session.subscription);
+          await supabase.from('subscriptions').upsert({
+            user_id: userId,
+            stripe_customer_id: session.customer,
+            stripe_subscription_id: sub.id,
+            status: sub.status,
+            plan_type: 'professionale_mensile',
+            monthly_quota: 15,
+            used_count: 0,
+            current_period_start: new Date(sub.current_period_start * 1000).toISOString(),
+            current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'user_id' });
+          trackEvent('subscription_started', { userId, metadata: { subscriptionId: sub.id } });
+        } catch (err) {
+          console.error('[stripe-webhook] falha ao ativar assinatura', err);
+        }
+      }
+      return res.json({ received: true });
+    }
+
     const { data: pending } = await supabase
       .from('pending_generations')
       .select('prompt, plan, user_id')
@@ -697,7 +742,216 @@ async function stripeWebhookHandler(req, res) {
     }
   }
 
+  // FIX PRODUTO 1: renovação de ciclo — reseta a cota usada quando um novo
+  // período de cobrança começa. Também cobre mudança de status (ex: cartão
+  // recusado -> past_due).
+  if (event.type === 'customer.subscription.updated') {
+    const sub = event.data.object;
+    const { data: existing } = await supabase
+      .from('subscriptions')
+      .select('current_period_start, used_count')
+      .eq('stripe_subscription_id', sub.id)
+      .maybeSingle();
+
+    const newPeriodStart = new Date(sub.current_period_start * 1000).toISOString();
+    const isNewPeriod = !existing || existing.current_period_start !== newPeriodStart;
+
+    await supabase
+      .from('subscriptions')
+      .update({
+        status: sub.status,
+        current_period_start: newPeriodStart,
+        current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
+        used_count: isNewPeriod ? 0 : (existing?.used_count ?? 0),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('stripe_subscription_id', sub.id);
+  }
+
+  if (event.type === 'customer.subscription.deleted') {
+    const sub = event.data.object;
+    await supabase
+      .from('subscriptions')
+      .update({ status: 'canceled', updated_at: new Date().toISOString() })
+      .eq('stripe_subscription_id', sub.id);
+  }
+
   res.json({ received: true });
+}
+
+// ============================================================================
+// FIX PRODUTO 1: assinatura mensal — helpers e endpoints
+// ============================================================================
+
+async function getActiveSubscription(userId) {
+  if (!userId) return null;
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function incrementSubscriptionUsage(subscriptionRowId, currentUsedCount) {
+  const { error } = await supabase
+    .from('subscriptions')
+    .update({ used_count: currentUsedCount + 1, updated_at: new Date().toISOString() })
+    .eq('id', subscriptionRowId);
+  if (error) throw error;
+}
+
+app.post('/crea-abbonamento', async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'pagamento_nao_configurado' });
+  try {
+    const user = await getAuthedUser(req);
+    if (!user) return res.status(401).json({ error: 'login_necessario' });
+
+    const currency = (req.body.currency || 'EUR').toUpperCase();
+    const priceId = getRegionPriceId(currency, 'abbonamento');
+    if (!priceId) return res.status(400).json({ error: 'plano_indisponivel' });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      customer_email: user.email || undefined,
+      success_url: `${process.env.APP_URL}?sub=1&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.APP_URL}?sub=0`,
+      metadata: { user_id: user.id },
+    });
+
+    return res.json({ url: session.url });
+  } catch (err) {
+    console.error('[/crea-abbonamento]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
+// Portal do Stripe: cancelamento/upgrade/downgrade/troca de cartão ficam
+// inteiramente a cargo do Stripe — não precisamos construir nada disso.
+app.post('/portale-cliente', async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'pagamento_nao_configurado' });
+  try {
+    const user = await getAuthedUser(req);
+    if (!user) return res.status(401).json({ error: 'login_necessario' });
+
+    const { data: sub } = await supabase
+      .from('subscriptions')
+      .select('stripe_customer_id')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (!sub?.stripe_customer_id) return res.status(404).json({ error: 'assinatura_nao_encontrada' });
+
+    const portalSession = await stripe.billingPortal.sessions.create({
+      customer: sub.stripe_customer_id,
+      return_url: process.env.APP_URL,
+    });
+
+    return res.json({ url: portalSession.url });
+  } catch (err) {
+    console.error('[/portale-cliente]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
+app.get('/assinatura/stato', async (req, res) => {
+  try {
+    const user = await getAuthedUser(req);
+    if (!user) return res.status(401).json({ error: 'login_necessario' });
+    const sub = await getActiveSubscription(user.id);
+    if (!sub) return res.json({ active: false });
+    return res.json({
+      active: true,
+      usedCount: sub.used_count,
+      monthlyQuota: sub.monthly_quota,
+      currentPeriodEnd: sub.current_period_end,
+    });
+  } catch (err) {
+    console.error('[/assinatura/stato]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
+// ============================================================================
+// FIX PRODUTO 2: certificados públicos — endpoints
+// ============================================================================
+
+function generateCertSlug() {
+  return Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+}
+
+app.post('/certificato/pubblica', async (req, res) => {
+  try {
+    const { courseTitle, studentName, completionDate, moduleCount } = req.body;
+    if (!courseTitle || !studentName) return res.status(400).json({ error: 'dados insuficientes' });
+
+    const user = await getAuthedUser(req); // opcional — funciona também no fluxo gratuito sem login
+    const slug = generateCertSlug();
+
+    const { error } = await supabase.from('public_certificates').insert({
+      slug,
+      user_id: user?.id || null,
+      course_title: courseTitle,
+      student_name: studentName,
+      completion_date: completionDate || new Date().toISOString(),
+      module_count: moduleCount || null,
+    });
+    if (error) throw error;
+
+    trackEvent('certificate_shared', { userId: user?.id, metadata: { slug } });
+    return res.json({ slug, url: `${process.env.APP_URL}?cert=${slug}` });
+  } catch (err) {
+    console.error('[/certificato/pubblica]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
+app.get('/certificato/:slug', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('public_certificates')
+      .select('course_title, student_name, completion_date, module_count')
+      .eq('slug', req.params.slug)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'certificado_nao_encontrado' });
+    return res.json(data);
+  } catch (err) {
+    console.error('[/certificato/:slug]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
+// ============================================================================
+// FIX PRODUTO 3: preço-base por região/moeda
+// ============================================================================
+// Cada moeda tem seu próprio conjunto de Price IDs no Stripe (preço-base
+// diferente, não conversão cambial do mesmo valor). O valor numérico em si
+// é configurado direto no Stripe — aqui só mapeamos qual Price ID usar.
+const REGION_PRICE_MAP = {
+  EUR: {
+    completo: process.env.STRIPE_PRICE_COMPLETO_EUR || process.env.STRIPE_PRICE_COMPLETO,
+    professionale: process.env.STRIPE_PRICE_PROFESSIONALE_EUR || process.env.STRIPE_PRICE_PROFESSIONALE,
+    abbonamento: process.env.STRIPE_PRICE_ABBONAMENTO_EUR,
+  },
+  USD: {
+    completo: process.env.STRIPE_PRICE_COMPLETO_USD || process.env.STRIPE_PRICE_COMPLETO,
+    professionale: process.env.STRIPE_PRICE_PROFESSIONALE_USD || process.env.STRIPE_PRICE_PROFESSIONALE,
+    abbonamento: process.env.STRIPE_PRICE_ABBONAMENTO_USD || process.env.STRIPE_PRICE_ABBONAMENTO_EUR,
+  },
+  default: {
+    completo: process.env.STRIPE_PRICE_COMPLETO,
+    professionale: process.env.STRIPE_PRICE_PROFESSIONALE,
+    abbonamento: process.env.STRIPE_PRICE_ABBONAMENTO_EUR,
+  },
+};
+
+function getRegionPriceId(currency, planKey) {
+  const region = REGION_PRICE_MAP[currency] || REGION_PRICE_MAP.default;
+  return region[planKey] || REGION_PRICE_MAP.default[planKey];
 }
 
 const PLAN_TO_PRICE_ID = {
