@@ -493,6 +493,38 @@ Respond ONLY with a valid JSON object, no text before or after, no markdown, wit
 });
 
 // ----------------------------------------------------------------------------
+// FIX PRODUTO 5: POST /traduci-corso — traduz/adapta um curso já gerado pra
+// outro idioma, reaproveitando a estrutura em vez de gerar do zero (mais
+// barato e mais rápido que uma geração nova). Recebe o curso completo já
+// pronto e devolve a mesma estrutura, com todo o texto no idioma novo.
+// ----------------------------------------------------------------------------
+app.post('/traduci-corso', async (req, res) => {
+  try {
+    const { course, targetLangName } = req.body;
+    if (!course || !targetLangName) return res.status(400).json({ error: 'dados insuficientes' });
+
+    // Limita o tamanho do curso enviado pra tradução, por segurança/custo.
+    const courseJson = JSON.stringify(course).slice(0, 40000);
+
+    const prompt = `Translate and culturally adapt the following micro-course JSON into ${targetLangName}. Keep the EXACT same JSON structure and field names — translate every text value (title, subtitle, module titles, summaries, content, key_points, quiz_question, quiz_answer, delivery_tip, sales_pitch, faq questions/answers if present). Do NOT translate the "categoria" field (keep it in English, it's an internal category key). Adapt idioms/examples naturally rather than translating word-for-word, but preserve the meaning and pedagogical structure exactly.
+
+Source course JSON:
+"""
+${courseJson}
+"""
+
+Respond ONLY with the translated JSON object, no text before or after, no markdown.`;
+
+    const translated = await callClaudeWithRetry(prompt, { maxTokens: 8192 });
+    trackEvent('course_translated', { metadata: { targetLangName } });
+    return res.json({ course: translated });
+  } catch (err) {
+    console.error('[/traduci-corso]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
+// ----------------------------------------------------------------------------
 // POST /crea-pagamento — cria a sessão de checkout no Stripe
 // ----------------------------------------------------------------------------
 app.post('/crea-pagamento', async (req, res) => {
@@ -987,7 +1019,7 @@ function generateCertSlug() {
 
 app.post('/certificato/pubblica', async (req, res) => {
   try {
-    const { courseTitle, studentName, completionDate, moduleCount } = req.body;
+    const { courseTitle, studentName, completionDate, moduleCount, quizScore } = req.body;
     if (!courseTitle || !studentName) return res.status(400).json({ error: 'dados insuficientes' });
 
     const user = await getAuthedUser(req); // opcional — funciona também no fluxo gratuito sem login
@@ -1000,11 +1032,15 @@ app.post('/certificato/pubblica', async (req, res) => {
       student_name: studentName,
       completion_date: completionDate || new Date().toISOString(),
       module_count: moduleCount || null,
+      quiz_score: (typeof quizScore === 'number') ? quizScore : null,
+      issued_by: 'Corsificio',
     });
     if (error) throw error;
 
     trackEvent('certificate_shared', { userId: user?.id, metadata: { slug } });
-    return res.json({ slug, url: `${env('APP_URL')}?cert=${slug}` });
+    // FIX PRODUTO 1a: URL de verificação, não só de compartilhamento —
+    // comunica "confira se isso é real", não só "olha meu certificado".
+    return res.json({ slug, url: `${env('APP_URL')}?verify=${slug}` });
   } catch (err) {
     console.error('[/certificato/pubblica]', err);
     return res.status(500).json({ error: err.message || 'erro interno' });
@@ -1015,7 +1051,7 @@ app.get('/certificato/:slug', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('public_certificates')
-      .select('course_title, student_name, completion_date, module_count')
+      .select('course_title, student_name, completion_date, module_count, quiz_score, issued_by, created_at')
       .eq('slug', req.params.slug)
       .maybeSingle();
     if (error) throw error;
