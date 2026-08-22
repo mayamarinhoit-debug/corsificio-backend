@@ -932,6 +932,51 @@ app.get('/assinatura/stato', async (req, res) => {
   }
 });
 
+// ----------------------------------------------------------------------------
+// FIX PRODUTO (vertical por nicho): lê/salva a vertical preferida do modo
+// profissional (saúde, fitness, negócios, coaching), pra sugerir de novo
+// automaticamente da próxima vez que a pessoa gerar um curso profissional.
+// ----------------------------------------------------------------------------
+const ALLOWED_VERTICALS = new Set(['salute', 'fitness', 'business', 'coaching']);
+
+app.get('/profilo/vertical', async (req, res) => {
+  try {
+    const user = await getAuthedUser(req);
+    if (!user) return res.status(401).json({ error: 'login_necessario' });
+    const { data, error } = await supabase
+      .from('user_profiles')
+      .select('preferred_vertical')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (error) throw error;
+    return res.json({ preferredVertical: data?.preferred_vertical || null });
+  } catch (err) {
+    console.error('[/profilo/vertical GET]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
+app.post('/profilo/vertical', async (req, res) => {
+  try {
+    const user = await getAuthedUser(req);
+    if (!user) return res.status(401).json({ error: 'login_necessario' });
+    const { vertical } = req.body;
+    if (vertical !== null && !ALLOWED_VERTICALS.has(vertical)) {
+      return res.status(400).json({ error: 'vertical_invalida' });
+    }
+    const { error } = await supabase.from('user_profiles').upsert({
+      user_id: user.id,
+      preferred_vertical: vertical,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id' });
+    if (error) throw error;
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[/profilo/vertical POST]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
 // ============================================================================
 // FIX PRODUTO 2: certificados públicos — endpoints
 // ============================================================================
