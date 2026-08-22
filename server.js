@@ -825,6 +825,10 @@ app.post('/crea-abbonamento', async (req, res) => {
     return res.json({ url: session.url });
   } catch (err) {
     console.error('[/crea-abbonamento]', err);
+    console.error('[/crea-abbonamento] DEBUG detalhe Stripe:', JSON.stringify({
+      message: err.message, type: err.type, param: err.param, code: err.code,
+    }));
+    console.error('[/crea-abbonamento] DEBUG APP_URL:', JSON.stringify(process.env.APP_URL));
     return res.status(500).json({ error: err.message || 'erro interno' });
   }
 });
