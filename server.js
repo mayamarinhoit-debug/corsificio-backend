@@ -49,14 +49,15 @@ const stripe = env('STRIPE_SECRET_KEY')
 if (!stripe) {
   console.warn('[startup] STRIPE_SECRET_KEY não configurada — /crea-pagamento e /genera-premium ficarão indisponíveis até configurar.');
 }
-// DEBUG TEMPORÁRIO: mostra no log se as variáveis chegaram até aqui, sem
-// revelar os valores secretos — remover depois que o problema for resolvido.
-console.log('[DEBUG env check]', {
-  SUPABASE_URL_presente: !!env('SUPABASE_URL'),
-  SUPABASE_URL_valor_comeca_com: (env('SUPABASE_URL') || '(vazio)').slice(0, 15),
-  SUPABASE_SERVICE_ROLE_KEY_presente: !!env('SUPABASE_SERVICE_ROLE_KEY'),
-  ANTHROPIC_API_KEY_presente: !!env('ANTHROPIC_API_KEY'),
-  todas_as_variaveis_disponiveis: Object.keys(process.env).filter(k => !k.startsWith('RAILWAY') && !k.startsWith('npm_')),
+// Log de inicialização — confirma que as variáveis essenciais chegaram
+// (só presença, nunca o valor) — útil pra depurar deploy sem vazar segredo
+// nenhum no log.
+console.log('[startup] variáveis de ambiente:', {
+  SUPABASE_URL: !!env('SUPABASE_URL'),
+  SUPABASE_SERVICE_ROLE_KEY: !!env('SUPABASE_SERVICE_ROLE_KEY'),
+  ANTHROPIC_API_KEY: !!env('ANTHROPIC_API_KEY'),
+  STRIPE_SECRET_KEY: !!env('STRIPE_SECRET_KEY'),
+  APP_URL: !!env('APP_URL'),
 });
 
 const supabase = createClient(
@@ -259,7 +260,7 @@ app.post('/genera', async (req, res) => {
     if (activeSub) {
       if (activeSub.used_count >= activeSub.monthly_quota) {
         trackEvent('subscription_quota_esgotada', { userId: user.id });
-        return res.status(403).json({ error: 'quota_mensile_esgotada' });
+        return res.status(403).json({ error: 'quota_mensile_esgotada', renewsAt: activeSub.current_period_end });
       }
       const course = await callClaudeWithRetry(prompt, { trackContext: { userId: user.id } });
       await incrementSubscriptionUsage(activeSub.id, activeSub.used_count);
@@ -497,9 +498,6 @@ app.post('/crea-pagamento', async (req, res) => {
     return res.json({ url: session.url, sessionId: session.id });
   } catch (err) {
     console.error('[/crea-pagamento]', err);
-    console.error('[/crea-pagamento] DEBUG detalhe Stripe:', JSON.stringify({
-      message: err.message, type: err.type, param: err.param, code: err.code,
-    }));
     return res.status(500).json({ error: err.message || 'erro interno' });
   }
 });
@@ -843,10 +841,6 @@ app.post('/crea-abbonamento', async (req, res) => {
     return res.json({ url: session.url });
   } catch (err) {
     console.error('[/crea-abbonamento]', err);
-    console.error('[/crea-abbonamento] DEBUG detalhe Stripe:', JSON.stringify({
-      message: err.message, type: err.type, param: err.param, code: err.code,
-    }));
-    console.error('[/crea-abbonamento] DEBUG APP_URL:', JSON.stringify(env('APP_URL')));
     return res.status(500).json({ error: err.message || 'erro interno' });
   }
 });
