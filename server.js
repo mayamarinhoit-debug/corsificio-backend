@@ -96,6 +96,17 @@ const aiEndpointLimiter = rateLimit({
   message: { error: 'muitas_requisicoes' },
 });
 
+// Mais permissivo que o de cima — é só leitura pública de certificado, não
+// chama IA nenhuma. Existe só pra dificultar um ataque de força bruta
+// tentando adivinhar slugs de certificados de outras pessoas.
+const publicReadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'muitas_requisicoes' },
+});
+
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
@@ -1058,8 +1069,13 @@ app.post('/profilo/vertical', async (req, res) => {
 // FIX PRODUTO 2: certificados públicos — endpoints
 // ============================================================================
 
+// FIX AUDITORIA: Math.random() não é criptograficamente segura e o slug
+// anterior tinha só ~31 bits de aleatoriedade real (o resto era timestamp,
+// previsível). Trocado por crypto.randomBytes — usado pra gerar o link
+// público do certificado, que expõe nome + curso + nota de quem o criou,
+// então vale ter aleatoriedade de verdade mesmo sendo um dado de baixo risco.
 function generateCertSlug() {
-  return Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+  return require('crypto').randomBytes(9).toString('base64url'); // 12 caracteres, ~72 bits
 }
 
 app.post('/certificato/pubblica', async (req, res) => {
@@ -1092,7 +1108,7 @@ app.post('/certificato/pubblica', async (req, res) => {
   }
 });
 
-app.get('/certificato/:slug', async (req, res) => {
+app.get('/certificato/:slug', publicReadLimiter, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('public_certificates')
