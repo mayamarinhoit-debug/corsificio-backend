@@ -37,6 +37,7 @@ const cors = require('cors');
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
 const Anthropic = require('@anthropic-ai/sdk');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 
@@ -81,6 +82,19 @@ app.post('/stripe-webhook', express.raw({ type: 'application/json' }), stripeWeb
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+// FIX AUDITORIA: /genera-anteprima, /genera-struttura, /rigenera-modulo e
+// /traduci-corso chamavam a IA sem NENHUMA verificação de login/cota — dava
+// pra contornar todo o sistema de limite gratuito/assinatura batendo direto
+// neles. Isso não substitui a cota de verdade (que continua em /genera),
+// é uma camada mínima contra abuso/script automatizado batendo sem parar.
+const aiEndpointLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hora
+  max: 20, // 20 chamadas por IP por hora nesses endpoints "leves"
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'muitas_requisicoes' },
+});
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -364,7 +378,7 @@ app.get('/stats/course-count', async (req, res) => {
   }
 });
 
-app.post('/genera-anteprima', async (req, res) => {
+app.post('/genera-anteprima', aiEndpointLimiter, async (req, res) => {
   try {
     const { prompt } = req.body;
     if (!prompt) return res.status(400).json({ error: 'prompt ausente' });
@@ -384,7 +398,7 @@ app.post('/genera-anteprima', async (req, res) => {
 // (padrão comum em ferramentas de curso por IA: "veja a estrutura primeiro").
 // Usa streaming de verdade (a Anthropic manda token a token) — o frontend
 // mostra os títulos aparecendo ao vivo, em vez de uma tela de espera.
-app.post('/genera-struttura', async (req, res) => {
+app.post('/genera-struttura', aiEndpointLimiter, async (req, res) => {
   try {
     const { prompt } = req.body;
     if (!prompt) return res.status(400).json({ error: 'prompt ausente' });
@@ -458,7 +472,7 @@ async function regenerateModuleWithRetry(prompt) {
   }
 }
 
-app.post('/rigenera-modulo', async (req, res) => {
+app.post('/rigenera-modulo', aiEndpointLimiter, async (req, res) => {
   try {
     const { courseTitle, moduleTitle, moduleIndex, totalModules, otherModuleTitles, langName } = req.body;
     if (!courseTitle || !moduleTitle) return res.status(400).json({ error: 'dados insuficientes' });
@@ -498,7 +512,7 @@ Respond ONLY with a valid JSON object, no text before or after, no markdown, wit
 // barato e mais rápido que uma geração nova). Recebe o curso completo já
 // pronto e devolve a mesma estrutura, com todo o texto no idioma novo.
 // ----------------------------------------------------------------------------
-app.post('/traduci-corso', async (req, res) => {
+app.post('/traduci-corso', aiEndpointLimiter, async (req, res) => {
   try {
     const { course, targetLangName } = req.body;
     if (!course || !targetLangName) return res.status(400).json({ error: 'dados insuficientes' });
