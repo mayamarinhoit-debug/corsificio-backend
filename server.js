@@ -934,6 +934,15 @@ app.post('/crea-abbonamento', async (req, res) => {
     const user = await getAuthedUser(req);
     if (!user) return res.status(401).json({ error: 'login_necessario' });
 
+    // FIX AUDITORIA: sem essa checagem, clicar em "Abbonati" duas vezes (ou
+    // esquecer que já assinou) criaria DUAS assinaturas ativas no Stripe,
+    // cobrando a pessoa duas vezes por mês. Isso não é só um detalhe
+    // técnico — é dinheiro saindo da conta do cliente por engano.
+    const existingSub = await getActiveSubscription(user.id);
+    if (existingSub) {
+      return res.status(409).json({ error: 'assinatura_ja_ativa' });
+    }
+
     const currency = (req.body.currency || 'EUR').toUpperCase();
     const priceId = getRegionPriceId(currency, 'abbonamento');
     if (!priceId) return res.status(400).json({ error: 'plano_indisponivel' });
