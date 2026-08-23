@@ -791,6 +791,16 @@ async function stripeWebhookHandler(req, res) {
       } else {
         try {
           const sub = await stripe.subscriptions.retrieve(session.subscription);
+          // FIX AUDITORIA: se já existe uma linha pra essa assinatura (webhook
+          // reenviado depois que a pessoa já gerou alguns cursos), preserva o
+          // used_count real em vez de resetar pra 0 de novo — sem isso, um
+          // reenvio do Stripe daria gerações grátis extras por engano.
+          const { data: existingSub } = await supabase
+            .from('subscriptions')
+            .select('used_count')
+            .eq('stripe_subscription_id', sub.id)
+            .maybeSingle();
+
           await supabase.from('subscriptions').upsert({
             user_id: userId,
             stripe_customer_id: session.customer,
@@ -798,7 +808,7 @@ async function stripeWebhookHandler(req, res) {
             status: sub.status,
             plan_type: 'professionale_mensile',
             monthly_quota: 15,
-            used_count: 0,
+            used_count: existingSub ? existingSub.used_count : 0,
             current_period_start: new Date(sub.current_period_start * 1000).toISOString(),
             current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
             updated_at: new Date().toISOString(),
@@ -813,9 +823,21 @@ async function stripeWebhookHandler(req, res) {
 
     const { data: pending } = await supabase
       .from('pending_generations')
-      .select('prompt, plan, user_id')
+      .select('prompt, plan, user_id, status')
       .eq('session_id', session.id)
       .maybeSingle();
+
+    // FIX AUDITORIA: idempotência — o Stripe reenvia o mesmo evento de
+    // webhook se não receber uma resposta 200 rápido o suficiente (ou em
+    // qualquer falha transitória). Sem essa checagem, um reenvio geraria o
+    // curso E mandaria o e-mail de entrega DUAS VEZES pro mesmo pagamento.
+    // Só dispara a geração se essa sessão ainda estiver no status inicial
+    // (nunca processada antes).
+    const alreadyProcessing = pending && pending.status !== 'pending_payment';
+    if (alreadyProcessing) {
+      console.warn(`[stripe-webhook] sessão ${session.id} já estava em status "${pending.status}" — ignorando reenvio duplicado do webhook.`);
+      return res.json({ received: true, duplicate: true });
+    }
 
     await supabase
       .from('pending_generations')
