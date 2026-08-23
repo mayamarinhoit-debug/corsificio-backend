@@ -1002,6 +1002,26 @@ app.post('/portale-cliente', async (req, res) => {
   }
 });
 
+// FIX AUDITORIA: o frontend confiava só no localStorage pra decidir se
+// ainda tinha gerações grátis e pra mostrar "faltam X grátis" — mas essa
+// contagem é só do NAVEGADOR, não da conta. Alguém logado em outro
+// dispositivo (onde o localStorage está zerado) veria "ainda tenho grátis",
+// clicaria, esperaria a geração, e só então o backend recusaria — um clique
+// em vão terminando em erro surpresa. Esse endpoint devolve o estado real
+// (do banco), pro frontend mostrar a mensagem certa desde o início.
+app.get('/free-usage/stato', async (req, res) => {
+  try {
+    const user = await getAuthedUser(req);
+    const deviceId = req.query.deviceId || null;
+    if (!user && !deviceId) return res.status(400).json({ error: 'deviceId_obrigatorio' });
+    const usage = await checkFreeUsage({ userId: user?.id || null, deviceId: user ? null : deviceId });
+    return res.json({ allowed: usage.allowed, remaining: usage.remaining, isLoggedIn: !!user });
+  } catch (err) {
+    console.error('[/free-usage/stato]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
 app.get('/assinatura/stato', async (req, res) => {
   try {
     const user = await getAuthedUser(req);
