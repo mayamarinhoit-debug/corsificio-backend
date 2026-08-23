@@ -295,6 +295,23 @@ app.post('/genera', async (req, res) => {
       });
     }
 
+    // FIX AUDITORIA: se a pessoa TEM assinatura mas o pagamento falhou
+    // (status "past_due"), ela não pode simplesmente cair na mensagem
+    // genérica de free-tier ("crie uma conta", "acabaram seus grátis") —
+    // isso confundiria alguém que já paga, fazendo parecer que o produto
+    // "esqueceu" que ela é assinante. Avisa especificamente o que houve.
+    if (user) {
+      const { data: pastDueSub } = await supabase
+        .from('subscriptions')
+        .select('status')
+        .eq('user_id', user.id)
+        .eq('status', 'past_due')
+        .maybeSingle();
+      if (pastDueSub) {
+        return res.status(402).json({ error: 'pagamento_assinatura_falhou' });
+      }
+    }
+
     const usageCheck = await checkFreeUsage({
       userId: user?.id || null,
       deviceId: user ? null : deviceId,
