@@ -1022,6 +1022,53 @@ app.get('/free-usage/stato', async (req, res) => {
   }
 });
 
+// FIX AUDITORIA (compliance LGPD/GDPR): direito de apagar a própria conta —
+// obrigação legal pra um produto que atende Itália (GDPR) e Brasil (LGPD),
+// não um recurso opcional. Cancela qualquer assinatura ativa primeiro (senão
+// a pessoa continuaria sendo cobrada por uma conta que não existe mais),
+// depois apaga os dados vinculados e por último a conta de autenticação.
+app.post('/conta/elimina', async (req, res) => {
+  try {
+    const user = await getAuthedUser(req);
+    if (!user) return res.status(401).json({ error: 'login_necessario' });
+
+    // 1. Cancela assinatura ativa no Stripe, se houver — senão a pessoa
+    //    seguiria sendo cobrada todo mês sem ter mais como gerenciar isso.
+    const { data: sub } = await supabase
+      .from('subscriptions')
+      .select('stripe_subscription_id')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (sub?.stripe_subscription_id && stripe) {
+      try {
+        await stripe.subscriptions.cancel(sub.stripe_subscription_id);
+      } catch (err) {
+        console.error('[/conta/elimina] falha ao cancelar assinatura no Stripe:', err.message);
+        // segue mesmo assim — não podemos deixar a pessoa presa sem poder apagar a conta
+      }
+    }
+
+    // 2. Apaga os dados vinculados nas nossas tabelas.
+    await supabase.from('subscriptions').delete().eq('user_id', user.id);
+    await supabase.from('free_usage').delete().eq('user_id', user.id);
+    await supabase.from('user_profiles').delete().eq('user_id', user.id);
+    await supabase.from('purchases').delete().eq('user_id', user.id);
+    // public_certificates: mantém o registro (é histórico público de conquista),
+    // só desvincula da conta — igual como já funciona pra quem nunca teve login.
+    await supabase.from('public_certificates').update({ user_id: null }).eq('user_id', user.id);
+
+    // 3. Por último, apaga a conta de autenticação em si.
+    const { error: deleteAuthError } = await supabase.auth.admin.deleteUser(user.id);
+    if (deleteAuthError) throw deleteAuthError;
+
+    trackEvent('account_deleted', { userId: user.id });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[/conta/elimina]', err);
+    return res.status(500).json({ error: err.message || 'erro interno' });
+  }
+});
+
 app.get('/assinatura/stato', async (req, res) => {
   try {
     const user = await getAuthedUser(req);
